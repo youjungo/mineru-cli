@@ -1,0 +1,25 @@
+# Rust
+target/
+
+# 环境变量与密钥（勿提交 API Token 等）
+.env
+.env.*
+!.env.example
+
+# 日志与调试
+*.log
+
+# 操作系统
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 编辑器与 IDE（按需保留团队共享的 .vscode 配置时可删掉下面两行）
+.idea/
+*.swp
+*.swo
+*~
+
+# 本地测试用大体积 PDF / 转换结果
+*.pdf
+test-output/
