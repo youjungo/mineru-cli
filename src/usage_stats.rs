@@ -42,7 +42,7 @@ pub struct UsageStatsResponse {
 
 fn usage_path() -> PathBuf {
     let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("mineru-converter");
+    p.push("mineru-cli");
     fs::create_dir_all(&p).ok();
     p.push("usage_stats.json");
     p

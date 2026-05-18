@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for contributing to MinerU Converter.
+Thanks for contributing to MinerU CLI.
 
 ## Development
 

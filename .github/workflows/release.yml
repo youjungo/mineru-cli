@@ -45,23 +45,23 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/mineru-converter dist/
+          cp target/${{ matrix.target }}/release/mineru-cli dist/
           cp README.md SPEC.md dist/
-          tar -czf mineru-converter-${{ matrix.target }}.tar.gz -C dist .
+          tar -czf mineru-cli-${{ matrix.target }}.tar.gz -C dist .
 
       - name: Package Windows
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/mineru-converter.exe dist/
+          Copy-Item target/${{ matrix.target }}/release/mineru-cli.exe dist/
           Copy-Item README.md,SPEC.md dist/
-          Compress-Archive -Path dist/* -DestinationPath mineru-converter-${{ matrix.target }}.zip
+          Compress-Archive -Path dist/* -DestinationPath mineru-cli-${{ matrix.target }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mineru-converter-${{ matrix.target }}
-          path: mineru-converter-${{ matrix.target }}.*
+          name: mineru-cli-${{ matrix.target }}
+          path: mineru-cli-${{ matrix.target }}.*
 
   publish:
     needs: build

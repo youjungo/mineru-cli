@@ -1,5 +1,5 @@
 [package]
-name = "mineru-converter"
+name = "mineru-cli"
 version = "1.8.0"
 description = "基于 MinerU API 的文档批量转换 CLI 工具"
 authors = ["youjungo"]
@@ -12,7 +12,7 @@ keywords = ["mineru", "markdown", "pdf", "cli"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "mineru-converter"
+name = "mineru-cli"
 path = "src/main.rs"
 
 [dependencies]

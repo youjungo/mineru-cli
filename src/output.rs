@@ -25,6 +25,8 @@ pub struct OrganizeOptions {
     pub page_end: Option<u32>,
     /// 拆分时用于图片文件名去重，如 `0_1`
     pub image_name_prefix: Option<String>,
+    #[serde(default)]
+    pub copy_images: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +134,9 @@ pub async fn organize_output(options: OrganizeOptions) -> Result<OrganizeResult,
         .unwrap_or(options.original_name.as_str());
 
     let images_dir = bundle_dir.join("images");
-    fs::create_dir_all(&images_dir).map_err(|e| format!("创建图片目录失败: {}", e))?;
+    if options.copy_images {
+        fs::create_dir_all(&images_dir).map_err(|e| format!("创建图片目录失败: {}", e))?;
+    }
 
     let mut markdown_files: Vec<String> = Vec::new();
     let prefix = options
@@ -210,7 +214,9 @@ pub async fn organize_output(options: OrganizeOptions) -> Result<OrganizeResult,
                         md_files.push(target_path.to_string_lossy().to_string());
                     }
                     "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" => {
-                        copy_image_dedup(&path, images_dir, prefix)?;
+                        if images_dir.exists() {
+                            copy_image_dedup(&path, images_dir, prefix)?;
+                        }
                     }
                     _ => {}
                 }
@@ -397,4 +403,60 @@ pub async fn fix_markdown_paths(
     }
 
     Ok(())
+}
+
+fn strip_html_img_tags(text: &str, re: &regex::Regex) -> String {
+    re.replace_all(text, "").to_string()
+}
+
+pub async fn strip_markdown_images(markdown_files: Vec<String>) -> Result<(), String> {
+    let md_img = regex::Regex::new(r"!\[[^\]]*\]\([^)]+\)")
+        .map_err(|e| format!("Markdown 图片正则无效: {}", e))?;
+    let html_img = regex::Regex::new(r#"(?is)<img\b[^>]*>"#)
+        .map_err(|e| format!("HTML img 正则无效: {}", e))?;
+
+    for md_path in markdown_files {
+        let path = Path::new(&md_path);
+        if !path.exists() {
+            continue;
+        }
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("读取 Markdown 文件失败: {}", e))?;
+        let mut new_content = md_img.replace_all(&content, "").to_string();
+        new_content = strip_html_img_tags(&new_content, &html_img);
+        if new_content != content {
+            fs::write(path, new_content).map_err(|e| format!("写入 Markdown 文件失败: {}", e))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn strip_markdown_images_removes_markdown_and_html_images() {
+        let dir =
+            std::env::temp_dir().join(format!("mineru-cli-strip-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.md");
+        fs::write(
+            &file,
+            "before\n![alt](images/a.png)\n<img src=\"b.png\" />\nafter\n",
+        )
+        .unwrap();
+
+        strip_markdown_images(vec![file.to_string_lossy().to_string()])
+            .await
+            .unwrap();
+
+        let out = fs::read_to_string(&file).unwrap();
+        assert!(!out.contains("![alt]"));
+        assert!(!out.contains("<img"));
+        assert!(out.contains("before"));
+        assert!(out.contains("after"));
+        let _ = fs::remove_dir_all(dir);
+    }
 }

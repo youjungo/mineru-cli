@@ -1,8 +1,8 @@
-# MinerU Converter CLI - 产品规格说明
+# MinerU CLI CLI - 产品规格说明
 
 ## 1. 产品概述
 
-MinerU Converter 是基于 MinerU 精准解析 API 的跨平台 CLI 工具。它面向脚本、批处理和本地自动化场景，将 PDF、图片、Word、PPT、HTML 批量转换为 Markdown，并在本地整理 Markdown 与图片资源。
+MinerU CLI 是基于 MinerU 精准解析 API 的跨平台 CLI 工具。它面向脚本、批处理和本地自动化场景，将 PDF、图片、Word、PPT、HTML 批量转换为纯 Markdown。
 
 ## 2. 核心功能
 
@@ -11,10 +11,10 @@ MinerU Converter 是基于 MinerU 精准解析 API 的跨平台 CLI 工具。它
 - 预检：检查文件类型、大小、PDF 页数。
 - PDF 拆分：PDF 超过配置页数或 200MB 时按页拆分。
 - MinerU API：获取上传 URL、PUT 上传、轮询解析结果、下载 Zip。
-- 输出整理：每个源文件一个 bundle 目录，Markdown 在根目录，图片统一进入 `images/`。
-- Markdown 修正：自动把本地图片引用修正到整理后的相对路径。
-- 多 API：支持多个 Token 配置，可按任务数均衡分配。
-- 用量统计：按 Token hash 记录每日任务数和页数。
+- 输出整理：每个源文件一个 bundle 目录，默认只保留 Markdown。
+- Markdown 修正：默认删除 Markdown 和 HTML 图片引用；`--output-assets` 时保留图片并修正路径。
+- 多 API：支持多个 Token、有效期、随机密钥池、超额重试。
+- 用量统计：按 Token hash 记录每日任务数和页数，每个 API 默认每日上限 8000 页。
 - CLI 输出：支持普通文本和 `--json` JSON Lines。
 
 ## 3. 技术架构
@@ -25,7 +25,7 @@ MinerU Converter 是基于 MinerU 精准解析 API 的跨平台 CLI 工具。它
 - HTTP：reqwest + rustls
 - PDF：lopdf
 - Zip：zip
-- 配置：TOML，存放于系统配置目录 `mineru-converter/config.toml`
+- 配置：TOML，存放于系统配置目录 `mineru-cli/config.toml`
 
 主要模块：
 
@@ -40,11 +40,11 @@ MinerU Converter 是基于 MinerU 精准解析 API 的跨平台 CLI 工具。它
 ## 4. 主要命令
 
 ```bash
-mineru-converter convert <inputs...>
-mineru-converter validate <inputs...>
-mineru-converter split <pdf> --output <dir>
-mineru-converter usage
-mineru-converter config <subcommand>
+mineru-cli convert <inputs...>
+mineru-cli validate <inputs...>
+mineru-cli split <pdf> --output <dir>
+mineru-cli usage
+mineru-cli config <subcommand>
 ```
 
 `convert` 支持：
@@ -61,6 +61,9 @@ mineru-converter config <subcommand>
 --delete-split-pdfs
 --delete-originals
 --balance-apis
+--ocr
+--no-ocr
+--output-assets
 --dry-run
 --json
 --verbose
@@ -73,11 +76,12 @@ mineru-converter config <subcommand>
   -> 扫描和校验
   -> PDF 按需拆分
   -> 构建转换任务
-  -> 分配 API Token
+  -> 随机选择可用 API Token
   -> 上传并轮询 MinerU
+  -> API 超额时自动换可用 Token 重试
   -> 下载 Zip
   -> 解压和整理输出
-  -> 修正 Markdown 图片路径
+  -> 默认删除 Markdown 图片引用
   -> 记录用量
   -> 可选删除临时分片/源文件
 ```
@@ -88,11 +92,9 @@ mineru-converter config <subcommand>
 输出目录/
 ├── 0_文档A/
 │   ├── 文档A_1-100页.md
-│   ├── 文档A_101-200页.md
-│   └── images/
+│   └── 文档A_101-200页.md
 └── 1_文档B/
-    ├── 文档B.md
-    └── images/
+    └── 文档B.md
 ```
 
 ## 7. 配置
@@ -108,9 +110,11 @@ delete_original_files_after_done = false
 api_request_pool_size = 10
 pdf_split_pages = 100
 balance_load_across_apis = false
+is_ocr = true
 
 [[apis]]
 id = "main"
 name = "Main API"
 token = "..."
+expires_at = "2026-12-31"
 ```

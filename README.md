@@ -1,15 +1,16 @@
-# MinerU Converter
+# MinerU CLI
 
-基于 MinerU 精准解析 API 的跨平台文档批量转换 CLI 工具。支持把 PDF、图片、Word、PPT、HTML 批量转换为 Markdown，并自动拆分大 PDF、下载结果、整理 Markdown 与图片目录。
+基于 MinerU 精准解析 API 的跨平台文档批量转换 CLI 工具。支持把 PDF、图片、Word、PPT、HTML 批量转换为纯 Markdown，并自动拆分大 PDF、下载结果、移除图片引用。
 
 ## 功能
 
 - 支持 PDF、图片、Word、PPT、HTML
 - PDF 超过拆分页数或 200MB 时自动拆分
-- 支持多 API Token 配置与按任务均衡分配
-- 自动下载 MinerU 结果 Zip 并整理输出目录
-- 自动修正 Markdown 中的图片相对路径
-- 本地记录每日用量统计
+- 支持多 API Token 配置、有效期、随机密钥池与超额重试
+- 每个 API 每日默认按 8000 页上限自动调度；指定 `--api` 时允许强制使用
+- 自动下载 MinerU 结果 Zip 并整理纯 Markdown 输出
+- 默认启用 OCR，并删除 Markdown 中的图片引用
+- 本地按密钥记录每日用量统计
 - 支持人类可读输出和 `--json` JSON Lines 输出
 
 ## 安装与构建
@@ -18,7 +19,7 @@
 
 ```bash
 cargo build --release
-./target/release/mineru-converter --version
+./target/release/mineru-cli --version
 ```
 
 正式发布通过 GitHub Releases 提供 Windows、Linux、macOS 二进制压缩包。
@@ -28,35 +29,35 @@ cargo build --release
 临时传入 Token 转换：
 
 ```bash
-mineru-converter convert ./docs -o ./out --token <MINERU_TOKEN>
+mineru-cli convert ./docs -o ./out --token <MINERU_TOKEN>
 ```
 
 保存 API 配置后转换：
 
 ```bash
-mineru-converter config add-api main "Main API" <MINERU_TOKEN>
-mineru-converter config set-active-api main
-mineru-converter config set-output ./out
-mineru-converter convert ./docs
+mineru-cli config add-api main "Main API" <MINERU_TOKEN> --expires-at 2026-12-31
+mineru-cli config set-active-api main
+mineru-cli config set-output ./out
+mineru-cli convert ./docs
 ```
 
 只校验输入，不调用 API：
 
 ```bash
-mineru-converter validate ./docs
-mineru-converter convert ./docs -o ./out --dry-run
+mineru-cli validate ./docs
+mineru-cli convert ./docs -o ./out --dry-run
 ```
 
 查看用量：
 
 ```bash
-mineru-converter usage
+mineru-cli usage
 ```
 
 ## 常用命令
 
 ```bash
-mineru-converter convert <inputs...>
+mineru-cli convert <inputs...>
   -o, --output <dir>
   --token <token>
   --api <id>
@@ -67,6 +68,9 @@ mineru-converter convert <inputs...>
   --delete-split-pdfs
   --delete-originals
   --balance-apis
+  --ocr
+  --no-ocr
+  --output-assets
   --dry-run
   --json
   --verbose
@@ -75,41 +79,38 @@ mineru-converter convert <inputs...>
 配置命令：
 
 ```bash
-mineru-converter config list
-mineru-converter config add-api <id> <name> <token>
-mineru-converter config remove-api <id>
-mineru-converter config set-active-api <id>
-mineru-converter config set-output <dir>
-mineru-converter config set split-pages 100
-mineru-converter config set pool-size 10
-mineru-converter config path
+mineru-cli config list
+mineru-cli config add-api <id> <name> <token> --expires-at 2026-12-31
+mineru-cli config update-api <id> --token <token> --expires-at 2027-12-31
+mineru-cli config remove-api <id>
+mineru-cli config set-active-api <id>
+mineru-cli config set-output <dir>
+mineru-cli config set split-pages 100
+mineru-cli config set pool-size 10
+mineru-cli config path
 ```
 
 ## 配置文件
 
 配置文件位于系统配置目录：
 
-- Windows: `%APPDATA%\mineru-converter\config.toml`
-- macOS: `~/Library/Application Support/mineru-converter/config.toml`
-- Linux: `~/.config/mineru-converter/config.toml`
+- Windows: `%APPDATA%\mineru-cli\config.toml`
+- macOS: `~/Library/Application Support/mineru-cli/config.toml`
+- Linux: `~/.config/mineru-cli/config.toml`
 
 Token 第一版以明文 TOML 保存。不要把配置文件提交到代码仓库或共享目录。
 
 ## 输出结构
 
-转换完成后，每个原始文件会生成一个独立文件夹：
+默认只输出 Markdown，不保存图片，并删除 Markdown 中的图片引用。加 `--output-assets` 后保留图片资源：
 
 ```text
 输出目录/
 ├── 0_文档A/
 │   ├── 文档A_1-100页.md
-│   ├── 文档A_101-200页.md
-│   └── images/
-│       ├── image1.png
-│       └── image2.jpg
+│   └── 文档A_101-200页.md
 └── 1_文档B/
-    ├── 文档B.md
-    └── images/
+    └── 文档B.md
 ```
 
 ## 退出码

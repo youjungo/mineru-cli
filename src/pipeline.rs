@@ -2,17 +2,28 @@ use crate::file_ops::{
     collect_paths_from_directory, delete_files, validate_files, FileInfo, FileValidationResult,
 };
 use crate::mineru_api::{poll_tasks, upload_and_convert, ConversionTask};
-use crate::output::{download_and_extract, fix_markdown_paths, organize_output, OrganizeOptions};
+use crate::output::{
+    download_and_extract, fix_markdown_paths, organize_output, strip_markdown_images,
+    OrganizeOptions,
+};
 use crate::pdf_splitter::{split_pdf, SplitResult};
-use crate::settings::{active_profile, ApiProfile, AppSettings};
+use crate::settings::{is_api_expired, ApiProfile, AppSettings};
 use crate::usage_stats::{get_usage_stats, record_usage_batch, UsageRecord};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-const DAILY_PAGE_LIMIT: u64 = 10_000;
+const DAILY_PAGE_LIMIT: u64 = 8_000;
 const MAX_PDF_WHOLE_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_PDF_WHOLE_UPLOAD_PAGES: u32 = 600;
+const QUOTA_ERROR_MARKERS: &[&str] = &[
+    "每日解析任务数量已达上限",
+    "quota",
+    "limit",
+    "-60018",
+    "额度",
+    "上限",
+];
 
 #[derive(Debug, Clone)]
 pub struct ConvertOptions {
@@ -30,6 +41,8 @@ pub struct ConvertOptions {
     pub balance_apis: bool,
     pub dry_run: bool,
     pub json: bool,
+    pub is_ocr: bool,
+    pub output_assets: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +189,14 @@ fn compute_pages_for_task(task: &ConversionTask, files: &[FileInfo]) -> UsageRec
     UsageRecord { pages, file_type }
 }
 
+fn pages_for_file(file: &FileInfo) -> u32 {
+    if file.file_type == "pdf" {
+        file.page_count.unwrap_or(1)
+    } else {
+        1
+    }
+}
+
 async fn split_files(
     files: &[FileInfo],
     output_dir: &str,
@@ -271,17 +292,21 @@ async fn choose_profiles(
     settings: &AppSettings,
     token: &Option<String>,
     api_id: &Option<String>,
-) -> Result<Vec<ApiProfile>, String> {
+) -> Result<(Vec<ApiProfile>, bool), String> {
     if let Some(token) = token {
         let token = token.trim();
         if token.is_empty() {
             return Err("Token 不能为空".to_string());
         }
-        return Ok(vec![ApiProfile {
-            id: "cli-token".to_string(),
-            name: "CLI Token".to_string(),
-            token: token.to_string(),
-        }]);
+        return Ok((
+            vec![ApiProfile {
+                id: "cli-token".to_string(),
+                name: "CLI Token".to_string(),
+                token: token.to_string(),
+                expires_at: None,
+            }],
+            true,
+        ));
     }
     if let Some(id) = api_id {
         let p = settings
@@ -293,19 +318,35 @@ async fn choose_profiles(
         if p.token.trim().is_empty() {
             return Err(format!("API 配置缺少 Token: {}", id));
         }
-        return Ok(vec![p]);
-    }
-    let active = active_profile(settings).ok_or_else(|| {
-        "未配置 API Token，请使用 --token 或 mineru-converter config add-api".to_string()
-    })?;
-    let mut out = Vec::new();
-    out.push(active.clone());
-    for p in &settings.apis {
-        if p.id != active.id && !p.token.trim().is_empty() {
-            out.push(p.clone());
+        if is_api_expired(&p) {
+            return Err(format!("API 配置已过期: {}", id));
         }
+        return Ok((vec![p], true));
     }
-    Ok(out)
+    let mut out: Vec<ApiProfile> = settings
+        .apis
+        .iter()
+        .filter(|p| !p.token.trim().is_empty() && !is_api_expired(p))
+        .cloned()
+        .collect();
+    if out.is_empty() {
+        return Err(
+            "没有可用 API：请检查 Token 是否为空、是否已过期，或使用 --api 强制指定".to_string(),
+        );
+    }
+    rotate_profiles_by_time(&mut out);
+    Ok((out, false))
+}
+
+fn rotate_profiles_by_time(profiles: &mut [ApiProfile]) {
+    if profiles.len() < 2 {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    profiles.rotate_left(nanos % profiles.len());
 }
 
 async fn assign_apis(
@@ -313,6 +354,7 @@ async fn assign_apis(
     files: &[FileInfo],
     profiles: &[ApiProfile],
     balance: bool,
+    allow_over_quota: bool,
 ) -> Vec<ConversionTask> {
     let mut remaining = HashMap::new();
     for p in profiles {
@@ -331,7 +373,14 @@ async fn assign_apis(
             .filter(|p| remaining.get(&p.id).copied().unwrap_or(0) >= pages)
             .collect();
         if pool.is_empty() {
-            pool = profiles.iter().collect();
+            if allow_over_quota {
+                pool = profiles.iter().collect();
+            } else {
+                task.status = "failed".to_string();
+                task.error = Some("所有 API 今日剩余额度不足".to_string());
+                assigned.push(task);
+                continue;
+            }
         }
         let chosen = if balance && pool.len() > 1 {
             pool.into_iter()
@@ -356,6 +405,7 @@ async fn download_and_organize(
     output_dir: &str,
     use_source_dir: bool,
     json: bool,
+    output_assets: bool,
 ) -> Vec<ConversionTask> {
     let profile_tokens: HashMap<String, String> = profiles
         .iter()
@@ -388,13 +438,17 @@ async fn download_and_organize(
                     page_start: task.page_range.map(|r| r.0),
                     page_end: task.page_range.map(|r| r.1),
                     image_name_prefix: task.page_range.map(|_| task.id.clone()),
+                    copy_images: output_assets,
                 };
                 match organize_output(options).await {
                     Ok(result) if result.success => {
-                        if let Err(e) =
+                        let path_result = if output_assets {
                             fix_markdown_paths(result.markdown_files.clone(), result.images_dir)
                                 .await
-                        {
+                        } else {
+                            strip_markdown_images(result.markdown_files.clone()).await
+                        };
+                        if let Err(e) = path_result {
                             tasks[idx].status = "failed".to_string();
                             tasks[idx].error = Some(e);
                             continue;
@@ -437,6 +491,82 @@ async fn download_and_organize(
         let _ = record_usage_batch(token, records).await;
     }
     tasks
+}
+
+fn is_quota_error(task: &ConversionTask) -> bool {
+    let Some(error) = task.error.as_deref() else {
+        return false;
+    };
+    let lower = error.to_lowercase();
+    QUOTA_ERROR_MARKERS
+        .iter()
+        .any(|marker| lower.contains(&marker.to_lowercase()))
+}
+
+async fn submit_with_quota_retry(
+    first_profile: &ApiProfile,
+    profiles: &[ApiProfile],
+    tasks: Vec<ConversionTask>,
+    is_ocr: bool,
+    allow_over_quota: bool,
+) -> Result<Vec<ConversionTask>, String> {
+    let mut remaining_tasks = tasks;
+    let mut results = Vec::new();
+    let mut tried = HashSet::new();
+    let mut ordered = Vec::new();
+    ordered.push(first_profile.clone());
+    ordered.extend(
+        profiles
+            .iter()
+            .filter(|p| p.id != first_profile.id)
+            .cloned(),
+    );
+
+    for profile in ordered {
+        if remaining_tasks.is_empty() {
+            break;
+        }
+        if !allow_over_quota {
+            let used = get_usage_stats(profile.token.clone())
+                .await
+                .map(|s| s.total_pages)
+                .unwrap_or(0);
+            if used >= DAILY_PAGE_LIMIT {
+                continue;
+            }
+        }
+        tried.insert(profile.id.clone());
+        let profile_tasks: Vec<ConversionTask> = remaining_tasks
+            .drain(..)
+            .map(|mut t| {
+                t.api_profile_id = Some(profile.id.clone());
+                t.status = "pending".to_string();
+                t.error = None;
+                t.task_id = None;
+                t.zip_url = None;
+                t
+            })
+            .collect();
+        let uploaded = upload_and_convert(profile.token.clone(), profile_tasks, is_ocr).await?;
+        let polled = poll_tasks(profile.token.clone(), uploaded).await?;
+        for task in polled {
+            if task.status == "failed" && is_quota_error(&task) && !allow_over_quota {
+                remaining_tasks.push(task);
+            } else {
+                results.push(task);
+            }
+        }
+    }
+
+    for mut task in remaining_tasks {
+        task.status = "failed".to_string();
+        task.error = Some(format!(
+            "所有可用 API 均已超额或重试失败（已尝试 {} 个 API）",
+            tried.len()
+        ));
+        results.push(task);
+    }
+    Ok(results)
 }
 
 fn cleanup(
@@ -505,6 +635,18 @@ pub async fn run_convert(
     let mut files = validation.valid_files;
     files.extend(validation.files_needing_split);
 
+    if let Some(over_limit) = files
+        .iter()
+        .find(|f| f.file_type == "pdf" && f.page_count.unwrap_or(0) > DAILY_PAGE_LIMIT as u32)
+    {
+        return Err(format!(
+            "PDF 超过每 API 每日上限 {} 页：{}（{} 页），已停止",
+            DAILY_PAGE_LIMIT,
+            over_limit.name,
+            over_limit.page_count.unwrap_or(0)
+        ));
+    }
+
     if files.is_empty() {
         return Ok(ConvertSummary {
             valid_files: 0,
@@ -545,13 +687,53 @@ pub async fn run_convert(
     let split_results = split_files(&files, &output_dir, options.split_pages, options.json).await;
     let tasks = build_tasks(&files, &split_results);
 
-    let profiles = choose_profiles(settings, &options.token, &options.api_id).await?;
-    let assigned = assign_apis(tasks, &files, &profiles, options.balance_apis).await;
+    let (profiles, allow_over_quota) =
+        choose_profiles(settings, &options.token, &options.api_id).await?;
+    if !allow_over_quota {
+        let total_pages: u64 = files.iter().map(|f| pages_for_file(f) as u64).sum();
+        let mut available_pages = 0u64;
+        for profile in &profiles {
+            let used = get_usage_stats(profile.token.clone())
+                .await
+                .map(|s| s.total_pages)
+                .unwrap_or(0);
+            available_pages += DAILY_PAGE_LIMIT.saturating_sub(used);
+        }
+        if available_pages == 0 {
+            return Err(
+                "所有 API 今日额度都已用尽；可使用 --api <id> 强制指定某个 API".to_string(),
+            );
+        }
+        if total_pages > available_pages {
+            info(
+                options.json,
+                format!(
+                    "本次预计 {} 页，自动密钥池剩余额度 {} 页，部分任务可能无法分配",
+                    total_pages, available_pages
+                ),
+            );
+        }
+    }
+    let assigned = assign_apis(
+        tasks,
+        &files,
+        &profiles,
+        options.balance_apis,
+        allow_over_quota,
+    )
+    .await;
     let pool_size = options.pool_size.max(1) as usize;
-    let mut final_tasks = Vec::new();
+    let mut final_tasks: Vec<ConversionTask> = assigned
+        .iter()
+        .filter(|t| t.status == "failed")
+        .cloned()
+        .collect();
 
     let mut by_original: HashMap<usize, Vec<ConversionTask>> = HashMap::new();
     for task in assigned {
+        if task.status == "failed" {
+            continue;
+        }
         let idx = task
             .id
             .split('-')
@@ -581,9 +763,15 @@ pub async fn run_convert(
                 options.json,
                 format!("{}: 提交 {} 个任务", profile.name, profile_tasks.len()),
             );
-            let uploaded = upload_and_convert(profile.token.clone(), profile_tasks).await?;
-            let polled = poll_tasks(profile.token.clone(), uploaded).await?;
-            final_tasks.extend(polled);
+            let mut polled = submit_with_quota_retry(
+                profile,
+                &profiles,
+                profile_tasks,
+                options.is_ocr,
+                allow_over_quota,
+            )
+            .await?;
+            final_tasks.append(&mut polled);
         }
     }
 
@@ -594,6 +782,7 @@ pub async fn run_convert(
         &output_dir,
         options.use_source_dir,
         options.json,
+        options.output_assets,
     )
     .await;
 

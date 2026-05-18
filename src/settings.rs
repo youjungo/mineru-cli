@@ -22,11 +22,17 @@ fn default_pdf_split_pages() -> u32 {
     100
 }
 
+fn default_is_ocr() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiProfile {
     pub id: String,
     pub name: String,
     pub token: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +54,8 @@ pub struct AppSettings {
     pub pdf_split_pages: u32,
     #[serde(default)]
     pub balance_load_across_apis: bool,
+    #[serde(default = "default_is_ocr")]
+    pub is_ocr: bool,
 }
 
 impl Default for AppSettings {
@@ -62,6 +70,7 @@ impl Default for AppSettings {
             api_request_pool_size: default_api_request_pool_size(),
             pdf_split_pages: default_pdf_split_pages(),
             balance_load_across_apis: false,
+            is_ocr: true,
         }
     }
 }
@@ -76,7 +85,7 @@ impl AppSettings {
 
 pub fn config_dir() -> PathBuf {
     let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push("mineru-converter");
+    path.push("mineru-cli");
     fs::create_dir_all(&path).ok();
     path
 }
@@ -111,4 +120,41 @@ pub fn active_profile(settings: &AppSettings) -> Option<ApiProfile> {
         .and_then(|id| settings.apis.iter().find(|p| p.id == id))
         .or_else(|| settings.apis.iter().find(|p| !p.token.trim().is_empty()))
         .cloned()
+}
+
+pub fn is_api_expired(profile: &ApiProfile) -> bool {
+    let Some(expires_at) = profile.expires_at.as_deref() else {
+        return false;
+    };
+    match chrono::NaiveDate::parse_from_str(expires_at, "%Y-%m-%d") {
+        Ok(date) => date < chrono::Local::now().date_naive(),
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_without_expiry_is_available() {
+        let p = ApiProfile {
+            id: "a".to_string(),
+            name: "A".to_string(),
+            token: "token".to_string(),
+            expires_at: None,
+        };
+        assert!(!is_api_expired(&p));
+    }
+
+    #[test]
+    fn invalid_expiry_disables_api() {
+        let p = ApiProfile {
+            id: "a".to_string(),
+            name: "A".to_string(),
+            token: "token".to_string(),
+            expires_at: Some("not-a-date".to_string()),
+        };
+        assert!(is_api_expired(&p));
+    }
 }

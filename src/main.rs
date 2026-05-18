@@ -11,7 +11,7 @@ use pipeline::{collect_and_validate, run_convert, ConvertOptions};
 use settings::{load_settings, save_settings, ApiProfile};
 
 #[derive(Parser)]
-#[command(name = "mineru-converter")]
+#[command(name = "mineru-cli")]
 #[command(version)]
 #[command(about = "MinerU 文档批量转换 CLI 工具")]
 struct Cli {
@@ -57,6 +57,12 @@ struct ConvertArgs {
     delete_originals: bool,
     #[arg(long)]
     balance_apis: bool,
+    #[arg(long)]
+    ocr: bool,
+    #[arg(long)]
+    no_ocr: bool,
+    #[arg(long)]
+    output_assets: bool,
     #[arg(long)]
     dry_run: bool,
     #[arg(long)]
@@ -105,6 +111,17 @@ enum ConfigCommands {
         id: String,
         name: String,
         token: String,
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    UpdateApi {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        expires_at: Option<String>,
     },
     RemoveApi {
         id: String,
@@ -175,6 +192,12 @@ async fn run(cli: Cli) -> Result<i32, (i32, String)> {
                 balance_apis: args.balance_apis || settings.balance_load_across_apis,
                 dry_run: args.dry_run,
                 json: args.json,
+                is_ocr: if args.no_ocr {
+                    false
+                } else {
+                    args.ocr || settings.is_ocr
+                },
+                output_assets: args.output_assets,
             };
             let summary = run_convert(&settings, options).await.map_err(|e| (5, e))?;
             if args.json {
@@ -210,6 +233,8 @@ async fn run(cli: Cli) -> Result<i32, (i32, String)> {
                 balance_apis: false,
                 dry_run: true,
                 json: args.json,
+                is_ocr: settings.is_ocr,
+                output_assets: false,
             };
             let result = collect_and_validate(&options).await.map_err(|e| (4, e))?;
             if args.json {
@@ -283,11 +308,13 @@ fn run_config(command: ConfigCommands) -> Result<i32, (i32, String)> {
             println!("拆分页数: {}", settings.pdf_split_pages);
             println!("请求池大小: {}", settings.api_request_pool_size);
             println!("多 API 均衡: {}", settings.balance_load_across_apis);
+            println!("OCR: {}", settings.is_ocr);
             println!("API:");
             for p in &settings.apis {
                 let active = settings.active_api_id.as_deref() == Some(p.id.as_str());
+                let expired = settings::is_api_expired(p);
                 println!(
-                    "  {}{} {} token:{}",
+                    "  {}{} {} token:{} expires_at:{}{}",
                     if active { "*" } else { "-" },
                     p.id,
                     p.name,
@@ -295,23 +322,56 @@ fn run_config(command: ConfigCommands) -> Result<i32, (i32, String)> {
                         "empty"
                     } else {
                         "set"
-                    }
+                    },
+                    p.expires_at.as_deref().unwrap_or("-"),
+                    if expired { " expired" } else { "" }
                 );
             }
         }
-        ConfigCommands::AddApi { id, name, token } => {
+        ConfigCommands::AddApi {
+            id,
+            name,
+            token,
+            expires_at,
+        } => {
+            validate_expires_at(expires_at.as_deref())?;
             if let Some(existing) = settings.apis.iter_mut().find(|p| p.id == id) {
                 existing.name = name;
                 existing.token = token;
+                existing.expires_at = expires_at;
             } else {
                 settings.apis.push(ApiProfile {
                     id: id.clone(),
                     name,
                     token,
+                    expires_at,
                 });
             }
             if settings.active_api_id.is_none() {
                 settings.active_api_id = Some(id);
+            }
+            save_settings(&settings).map_err(|e| (3, e))?;
+        }
+        ConfigCommands::UpdateApi {
+            id,
+            name,
+            token,
+            expires_at,
+        } => {
+            validate_expires_at(expires_at.as_deref())?;
+            let profile = settings
+                .apis
+                .iter_mut()
+                .find(|p| p.id == id)
+                .ok_or_else(|| (3, format!("未找到 API 配置: {}", id)))?;
+            if let Some(name) = name {
+                profile.name = name;
+            }
+            if let Some(token) = token {
+                profile.token = token;
+            }
+            if expires_at.is_some() {
+                profile.expires_at = expires_at;
             }
             save_settings(&settings).map_err(|e| (3, e))?;
         }
@@ -359,6 +419,9 @@ fn run_config(command: ConfigCommands) -> Result<i32, (i32, String)> {
                 "balance-apis" | "balance_load_across_apis" => {
                     settings.balance_load_across_apis = parse_bool(&value)?;
                 }
+                "ocr" | "is_ocr" => {
+                    settings.is_ocr = parse_bool(&value)?;
+                }
                 _ => return Err((2, format!("未知配置项: {}", key))),
             }
             save_settings(&settings).map_err(|e| (3, e))?;
@@ -376,4 +439,13 @@ fn parse_bool(value: &str) -> Result<bool, (i32, String)> {
         "false" | "0" | "no" | "off" => Ok(false),
         _ => Err((2, format!("不是布尔值: {}", value))),
     }
+}
+
+fn validate_expires_at(value: Option<&str>) -> Result<(), (i32, String)> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map(|_| ())
+        .map_err(|_| (2, "expires-at 必须使用 YYYY-MM-DD 格式".to_string()))
 }

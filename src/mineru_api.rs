@@ -222,6 +222,7 @@ fn find_extract_item<'a>(
 pub async fn upload_and_convert(
     token: String,
     files: Vec<ConversionTask>,
+    is_ocr: bool,
 ) -> Result<Vec<ConversionTask>, String> {
     let client = create_client(&token);
     let mut results = files;
@@ -250,7 +251,7 @@ pub async fn upload_and_convert(
                 let item = BatchFileItem {
                     name: name_on_disk,
                     data_id: task.id.clone(),
-                    is_ocr: Some(true),
+                    is_ocr: Some(is_ocr),
                 };
 
                 let (batch_id, urls) = match request_batch_upload_urls(&client, vec![item]).await {
