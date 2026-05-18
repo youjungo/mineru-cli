@@ -1,6 +1,6 @@
 [package]
 name = "mineru-cli"
-version = "1.8.0"
+version = "1.8.1"
 description = "基于 MinerU API 的文档批量转换 CLI 工具"
 authors = ["youjungo"]
 edition = "2021"
