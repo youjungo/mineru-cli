@@ -11,6 +11,7 @@ use crate::settings::{is_api_expired, ApiProfile, AppSettings};
 use crate::usage_stats::{get_usage_stats, record_usage_batch, UsageRecord};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
 
 const DAILY_PAGE_LIMIT: u64 = 8_000;
@@ -92,11 +93,82 @@ pub fn make_bundle_folder(file_index: usize, display_name: &str) -> String {
         .chars()
         .take(120)
         .collect();
-    format!(
-        "{}_{}",
-        file_index,
-        if safe.is_empty() { "document" } else { &safe }
-    )
+    let _ = file_index;
+    if safe.is_empty() {
+        "document".to_string()
+    } else {
+        safe
+    }
+}
+
+fn remove_empty_dir(path: &Path) {
+    if path.is_dir() {
+        fs::remove_dir(path).ok();
+    }
+}
+
+fn flatten_single_file_bundle(bundle_dir: &Path) -> Result<(), String> {
+    remove_empty_dir(&bundle_dir.join(".extract"));
+    remove_empty_dir(&bundle_dir.join("images"));
+
+    let mut entries = fs::read_dir(bundle_dir)
+        .map_err(|e| format!("读取输出目录失败 {}: {}", bundle_dir.display(), e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取输出目录失败 {}: {}", bundle_dir.display(), e))?;
+
+    if entries.len() != 1 {
+        return Ok(());
+    }
+
+    let only_path = entries.remove(0).path();
+    if !only_path.is_file() {
+        return Ok(());
+    }
+
+    let Some(parent) = bundle_dir.parent() else {
+        return Ok(());
+    };
+    let Some(file_name) = only_path.file_name() else {
+        return Ok(());
+    };
+    let target = parent.join(file_name);
+    if target != only_path {
+        fs::rename(&only_path, &target)
+            .or_else(|_| {
+                fs::copy(&only_path, &target)?;
+                fs::remove_file(&only_path)
+            })
+            .map_err(|e| format!("移动单文件输出失败 {}: {}", only_path.display(), e))?;
+    }
+    fs::remove_dir(bundle_dir).ok();
+    Ok(())
+}
+
+fn flatten_completed_single_file_bundles(
+    tasks: &[ConversionTask],
+    files: &[FileInfo],
+    output_dir: &str,
+    use_source_dir: bool,
+    json: bool,
+) {
+    let mut complete_bundles = HashSet::new();
+    for (idx, file) in files.iter().enumerate() {
+        let bundle = make_bundle_folder(idx, &file.name);
+        let related: Vec<_> = tasks.iter().filter(|t| t.bundle_folder == bundle).collect();
+        if !related.is_empty() && related.iter().all(|t| t.status == "done") {
+            let task_output_dir = resolve_output_dir(related[0], files, output_dir, use_source_dir);
+            complete_bundles.insert((task_output_dir, bundle));
+        }
+    }
+
+    for (task_output_dir, bundle) in complete_bundles {
+        let bundle_dir = Path::new(&task_output_dir).join(&bundle);
+        if bundle_dir.is_dir() {
+            if let Err(e) = flatten_single_file_bundle(&bundle_dir) {
+                info(json, e);
+            }
+        }
+    }
 }
 
 fn json_event<T: Serialize>(json: bool, event: &str, payload: &T) {
@@ -786,6 +858,14 @@ pub async fn run_convert(
     )
     .await;
 
+    flatten_completed_single_file_bundles(
+        &final_tasks,
+        &files,
+        &output_dir,
+        options.use_source_dir,
+        options.json,
+    );
+
     cleanup(
         &files,
         &split_results,
@@ -836,8 +916,8 @@ mod tests {
 
     #[test]
     fn bundle_folder_is_stable_and_path_safe() {
-        assert_eq!(make_bundle_folder(3, "a/b:c?.pdf"), "3_a_b_c_");
-        assert_eq!(make_bundle_folder(0, "report.pdf"), "0_report");
+        assert_eq!(make_bundle_folder(3, "a/b:c?.pdf"), "a_b_c_");
+        assert_eq!(make_bundle_folder(0, "report.pdf"), "report");
     }
 
     #[test]
@@ -855,5 +935,37 @@ mod tests {
             file("slide.pptx", "ppt", None, false),
         ];
         assert_eq!(estimate_task_count(&files, 100), 4);
+    }
+
+    #[test]
+    fn flatten_single_file_bundle_moves_file_to_parent() {
+        let root =
+            std::env::temp_dir().join(format!("mineru-cli-flatten-single-{}", std::process::id()));
+        let bundle = root.join("report");
+        fs::create_dir_all(bundle.join(".extract")).unwrap();
+        fs::write(bundle.join("report.md"), "# report").unwrap();
+
+        flatten_single_file_bundle(&bundle).unwrap();
+
+        assert!(root.join("report.md").is_file());
+        assert!(!bundle.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn flatten_single_file_bundle_keeps_multi_file_bundle() {
+        let root =
+            std::env::temp_dir().join(format!("mineru-cli-flatten-multi-{}", std::process::id()));
+        let bundle = root.join("book");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(bundle.join("book_1-100页.md"), "# part 1").unwrap();
+        fs::write(bundle.join("book_101-200页.md"), "# part 2").unwrap();
+
+        flatten_single_file_bundle(&bundle).unwrap();
+
+        assert!(bundle.join("book_1-100页.md").is_file());
+        assert!(bundle.join("book_101-200页.md").is_file());
+        assert!(!root.join("book_1-100页.md").exists());
+        let _ = fs::remove_dir_all(root);
     }
 }
