@@ -22,7 +22,7 @@ dirs = "5.0"
 futures = "0.3"
 log = "0.4"
 env_logger = "0.11"
-lopdf = "0.34"
+lopdf = "0.40"
 rayon = "1.10"
 regex = "1.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
